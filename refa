@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Repair Rush — Service Team</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  :root { --bg:#0b0b0b; --fg:#eaeaea; --accent:#22c55e; --danger:#ef4444; --belt:#1a1a1a; --zone:#0ea5e9; }
+  *{box-sizing:border-box} html,body{height:100%;margin:0}
+  body{
+    background:var(--bg); color:var(--fg);
+    display:flex; align-items:center; justify-content:center;
+    font:13px/1.35 system-ui, Segoe UI, Roboto, Arial, sans-serif;
+  }
+  .wrap{display:flex; gap:12px; align-items:flex-start; flex-wrap:wrap}
+  canvas{background:#000; border:1px solid #2a2a2a; border-radius:6px; display:block}
+  .panel{width:190px; padding:8px; background:#111; border:1px solid #222; border-radius:6px}
+  .row{display:flex; justify-content:space-between; margin:4px 0}
+  .label{opacity:.8} .score{font-weight:700}
+  .keys{display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-top:6px}
+  .key{padding:6px 4px; text-align:center; background:#181818; border:1px solid #2a2a2a; border-radius:4px; font-size:12px}
+  .key b{display:block; font-size:14px}
+  .hint{opacity:.7; font-size:11px; margin-top:6px}
+  .btns{display:flex; gap:6px; margin-top:6px}
+  button{flex:1; padding:6px 8px; border:1px solid #2a2a2a; border-radius:4px; background:#181818; color:var(--fg); cursor:pointer; font-size:12px}
+  button:hover{background:#202020}
+  .overlay{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(0,0,0,.55); color:#fff; text-align:center; border-radius:6px; pointer-events:none;
+  }
+  .overlay.hidden{display:none}
+  .overlay .box{background:rgba(20,20,20,.92); padding:12px 14px; border:1px solid #333; border-radius:8px; min-width:240px}
+  .title{font-weight:800; margin-bottom:6px}
+  .danger{color:var(--danger)} .accent{color:var(--accent)}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div style="position:relative">
+      <!-- Smaller canvas so it fits a SharePoint column nicely -->
+      <canvas id="game" width="360" height="360"></canvas>
+      <div id="overlay" class="overlay">
+        <div class="box">
+          <div class="title">🔧 Repair Rush</div>
+          <div id="overlayText" style="margin-bottom:6px">
+            Press <b>Space</b> to start
+          </div>
+          <div class="hint">
+            Keys: <b>1</b>=ECG • <b>2</b>=Table • <b>3</b>=Toolbox<br/>
+            <b>P</b> pause • <b>R</b> restart • 3 lives
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="row"><div class="label">Score</div><div id="score" class="score">0</div></div>
+      <div class="row"><div class="label">High</div><div id="hi" class="score">0</div></div>
+      <div class="row"><div class="label">Lives</div><div id="lives" class="score">❤️❤️❤️</div></div>
+      <div class="row"><div class="label">Speed</div><div id="speed" class="score">1.0×</div></div>
+
+      <div class="keys">
+        <div class="key"><b>1</b>ECG</div>
+        <div class="key"><b>2</b>Table</div>
+        <div class="key"><b>3</b>Toolbox</div>
+      </div>
+
+      <div class="btns">
+        <button id="startBtn">Start</button>
+        <button id="pauseBtn">Pause</button>
+        <button id="resetBtn">Restart</button>
+      </div>
+      <div class="hint">Every 10 repairs → faster belt.</div>
+    </div>
+  </div>
+
+<script>
+/* ---------- Setup ---------- */
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+const scoreEl = document.getElementById('score');
+const hiEl    = document.getElementById('hi');
+const livesEl = document.getElementById('lives');
+const speedEl = document.getElementById('speed');
+const overlay = document.getElementById('overlay');
+const overlayText = document.getElementById('overlayText');
+
+const W = canvas.width, H = canvas.height;
+const grid = 30;                      // belt rows height
+const rows = Math.floor(H / grid);    // 12 for 360px
+const laneY = Array.from({length: rows}, (_,i)=> i*grid + grid/2);
+
+const REPAIR_ZONE_X = Math.floor(W*0.55); // where you fix items
+const ZONE_W = 60;
+
+const TYPES = [
+  { id:1, name:'ECG',    color:'#22c55e', glyph:'🫀' },
+  { id:2, name:'Table',  color:'#eab308', glyph:'🛏️' },
+  { id:3, name:'Toolbox',color:'#60a5fa', glyph:'🧰' }
+];
+
+let items = [];
+let running=false, paused=false, loopId=null;
+let score=0, hiScore= +localStorage.getItem('rush.hi') || 0;
+let lives=3, speed=1, tickMs=28;      // base tick
+let spawned=0;                        // to control difficulty
+
+hiEl.textContent = hiScore;
+updateLives(); updateSpeed();
+
+/* ---------- Game Core ---------- */
+function reset(){
+  items = [];
+  score = 0; lives = 3; speed = 1; spawned=0; tickMs=28;
+  scoreEl.textContent=score;
+  updateLives(); updateSpeed();
+}
+
+function start(){
+  if (running) return;
+  reset();
+  running = true; paused = false;
+  overlay.classList.add('hidden');
+  clearInterval(loopId);
+  loopId = setInterval(loop, tickMs);
+}
+
+function pause(){
+  if (!running) return;
+  paused = !paused;
+  if (paused){ clearInterval(loopId); overlay.classList.remove('hidden'); overlayText.innerHTML='Paused — press <b>P</b> to resume'; }
+  else { overlay.classList.add('hidden'); loopId=setInterval(loop, tickMs); }
+}
+
+function restart(){
+  clearInterval(loopId);
+  running=false; paused=false;
+  overlay.classList.remove('hidden');
+  overlayText.innerHTML='Press <b>Space</b> to start';
+  start();
+}
+
+/* ---------- Spawning ---------- */
+function spawnItem(){
+  const type = TYPES[Math.floor(Math.random()*TYPES.length)];
+  const lane = laneY[Math.floor(Math.random()*laneY.length)];
+  items.push({
+    type: type.id,
+    x: -40, y: lane,
+    w: 28, h: 22,
+    fixed:false, missed:false
+  });
+  spawned++;
+  // difficulty ramps every 10 spawns
+  if (spawned % 10 === 0){
+    speed = Math.min(3, speed + 0.15);
+    updateSpeed();
+    // faster tick → smoother movement
+    tickMs = Math.max(16, Math.round(tickMs * 0.93));
+    if (running && !paused){ clearInterval(loopId); loopId=setInterval(loop, tickMs); }
+  }
+}
+
+function updateSpeed(){
+  speedEl.textContent = speed.toFixed(1) + '×';
+}
+
+function updateLives(){
+  livesEl.textContent = '❤️'.repeat(lives) + '🖤'.repeat(3-lives);
+}
+
+/* ---------- Input ---------- */
+function handleKey(e){
+  const k = e.key.toLowerCase();
+  if (k===' '){ e.preventDefault(); if(!running) start(); return; }
+  if (k==='p'){ e.preventDefault(); pause(); return; }
+  if (k==='r'){ e.preventDefault(); restart(); return; }
+
+  if (!running || paused) return;
+  const num = (k==='1'||k==='2'||k==='3') ? +k : null;
+  if (!num) return;
+
+  // find an item currently in the repair zone
+  const target = items.find(it => !it.fixed && !it.missed &&
+    it.x + it.w/2 >= REPAIR_ZONE_X && it.x + it.w/2 <= REPAIR_ZONE_X + ZONE_W);
+
+  if (!target){
+    // pressed with nothing in zone -> small penalty? (optional)
+    return;
+  }
+
+  if (target.type === num){
+    target.fixed = true; score += 10; scoreEl.textContent=score;
+  } else {
+    // wrong key → life lost
+    lifeLost();
+    target.missed = true;
+  }
+}
+document.addEventListener('keydown', handleKey);
+
+/* ---------- Loop ---------- */
+let spawnTimer = 0, spawnEvery = 50;  // frames until next spawn
+
+function loop(){
+  // spawn logic
+  spawnTimer++;
+  if (spawnTimer >= spawnEvery){
+    spawnTimer = 0;
+    spawnEvery = Math.max(20, 50 - Math.floor(speed*6)); // faster when speed up
+    spawnItem();
+  }
+
+  // update positions
+  for (const it of items){
+    it.x += 2.0 * speed;
+    // if it passes the zone and not fixed -> miss
+    if (!it.fixed && !it.missed && it.x > REPAIR_ZONE_X + ZONE_W){
+      it.missed = true;
+      lifeLost();
+    }
+  }
+  // remove offscreen
+  items = items.filter(it => it.x < W + 40 && !it.fixed);
+
+  // draw
+  render();
+}
+
+function lifeLost(){
+  if (lives <= 0) return;
+  lives--; updateLives();
+  if (lives === 0) gameOver();
+}
+
+function gameOver(){
+  clearInterval(loopId);
+  running = false;
+  if (score > hiScore){ hiScore = score; localStorage.setItem('rush.hi', hiScore); hiEl.textContent = hiScore; }
+  overlay.classList.remove('hidden');
+  overlayText.innerHTML = `<span class="danger">Game over</span><br/>Repairs: <b>${score/10|0}</b> • Score: <b>${score}</b><br/>Press <b>R</b> to try again`;
+}
+
+/* ---------- Render ---------- */
+function render(){
+  // background
+  ctx.clearRect(0,0,W,H);
+
+  // belt lanes
+  ctx.fillStyle = '#0f0f0f';
+  ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle = '#1e1e1e';
+  for (let y=grid; y<H; y+=grid){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+
+  // repair zone
+  ctx.fillStyle = 'rgba(14,165,233,.12)';
+  ctx.fillRect(REPAIR_ZONE_X, 0, ZONE_W, H);
+  ctx.strokeStyle = '#0ea5e9';
+  ctx.strokeRect(REPAIR_ZONE_X, 0, ZONE_W, H);
+
+  // items
+  items.forEach(it=>{
+    const t = TYPES[it.type-1];
+    const x = it.x, y = it.y;
+
+    // body
+    ctx.fillStyle = it.missed ? 'rgba(239,68,68,.7)' : t.color;
+    ctx.fillRect(x-14, y-11, it.w, it.h);
+
+    // simple glyph label for fun
+    ctx.font = '12px system-ui,Segoe UI,Arial';
+    ctx.fillStyle = '#111';
+    ctx.textAlign='center';
+    ctx.fillText(t.name, x, y+18);
+
+    // tiny icon above
+    ctx.font = '16px serif';
+    ctx.fillText(t.glyph, x, y-16);
+  });
+
+  // HUD in-canvas (optional)
+  ctx.fillStyle = '#9ca3af';
+  ctx.font = '12px system-ui,Segoe UI,Arial';
+  ctx.textAlign='left';
+  ctx.fillText('Zone →', REPAIR_ZONE_X-42, 14);
+}
+
+/* ---------- Buttons ---------- */
+document.getElementById('startBtn').onclick = start;
+document.getElementById('pauseBtn').onclick = pause;
+document.getElementById('resetBtn').onclick = restart;
+
+/* ---------- Init ---------- */
+overlay.classList.remove('hidden');
+overlayText.innerHTML = 'Press <b>Space</b> to start';
+render();
+</script>
+</body>
+</html>
